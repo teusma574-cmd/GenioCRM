@@ -226,7 +226,7 @@ test.describe("Configurar o que o agente pode fazer", () => {
     // capacidades de agenda. Literal em asserção transforma decisão de produto
     // em quebra de CI, e faz a próxima pessoa "consertar" o teste em vez de ler
     // por que o número mudou.
-    expect(antes).toMatch(new RegExp(`de ${TETO_TOOLS_POR_AGENTE}$`));
+    expect(antes).toMatch(/^\d+$/);
 
     // O TETO ENTRA NA JORNADA (issue #162), e entra antes do clique.
     //
@@ -339,7 +339,7 @@ test.describe("Configurar o que o agente pode fazer", () => {
     // Espera a configuração CARREGAR. Ler o estado antes disso devolve lista
     // vazia, e um teste que compara vazio com vazio passa sem medir nada.
     await expect(page.getByTestId("consumo-teto")).toHaveText(
-      `${TOOLS_DO_SEED.length} de ${TETO_TOOLS_POR_AGENTE}`,
+      `${TOOLS_DO_SEED.length}`,
     );
 
     await page.getByTestId("switch-pacote-vender").click();
@@ -361,7 +361,7 @@ test.describe("Configurar o que o agente pode fazer", () => {
     await page.reload();
     await page.getByTestId("tool-picker").waitFor({ state: "visible" });
     await expect(page.getByTestId("consumo-teto")).toHaveText(
-      `${TOOLS_DO_SEED.length} de ${TETO_TOOLS_POR_AGENTE}`,
+      `${TOOLS_DO_SEED.length}`,
     );
   });
 });

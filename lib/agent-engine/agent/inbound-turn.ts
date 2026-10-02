@@ -77,6 +77,16 @@ import {
   prepararFotosDoProduto,
   type FotoParaEnvio,
 } from './fotos-do-produto';
+import {
+  blocoDeAnexos,
+  carregarAnexosDoAgente,
+  copiarAnexoNoStorage,
+  acharAnexoPeloNome,
+  enviarComAnexo,
+  marcarEnvioDoAnexo,
+  prepararAnexo,
+  type AnexoDoAgente,
+} from './anexos-do-agente';
 import { enqueueJob, rescheduleJob, type JobRow, type Queryable } from '../queue/queue';
 import {
   applyLeadStateUpdate,
@@ -241,6 +251,13 @@ export const AGENT_TOOL_DEFS = {
         .describe(
           'código de um produto do catálogo (o `codigo` de crm_search_products) que tem `fotos`: ' +
             'as fotos dele vão junto, e o texto vira a legenda da primeira',
+        ),
+      anexo: z
+        .string()
+        .optional()
+        .describe(
+          'NOME exato de um arquivo da seção "ARQUIVOS QUE VOCÊ PODE ENVIAR" do seu prompt: o arquivo ' +
+            'vai junto com esta mensagem. Só use se essa seção existir; não combine com produto_codigo',
         ),
     }),
   },
@@ -2231,6 +2248,17 @@ async function executarTurnoDoAgente(
   // testada (o bloco da cadeia nomeia `crm_list_event_types`, e nomear
   // ferramenta ausente faz o modelo tentar chamá-la).
   if (agentConfig !== null) blocosResidentes.push(...blocosDeAgendaResidentes(agentConfig.toolIds));
+  // Os arquivos que este agente pode enviar (0500): lidos a cada turno, como a
+  // config publicada — trocar um arquivo na tela vale no próximo turno. Sem
+  // arquivo, sem bloco: nomear recurso ausente faz o modelo tentar usá-lo.
+  const anexosDoAgente: AnexoDoAgente[] =
+    agentConfig !== null
+      ? await carregarAnexosDoAgente(pool, runLog, { tenantId, agentId: agentConfig.agentId })
+      : [];
+  const blocoDosAnexos = blocoDeAnexos(anexosDoAgente);
+  if (blocoDosAnexos !== null) blocosResidentes.push(blocoDosAnexos);
+  /** Envios de arquivo feitos NESTE turno, por id — cobre a marca que ainda não chegou ao banco. */
+  const anexosEnviadosNoTurno = new Map<string, number>();
   if (preview)
     blocosResidentes.push(
       'MODO PRÉVIA: proponha a resposta com send_message. Operações são propostas separadas; nunca diga que executou uma proposta. Nenhum envio real acontece.',
@@ -2665,6 +2693,37 @@ async function executarTurnoDoAgente(
   // quando o modelo decide mandar a resposta.
   let agendaToolCalledThisTurn = false;
   const outcomes: ChannelSendResult[] = [];
+  const acharEnviosNoTurno = (nome: string): number => {
+    const achado = acharAnexoPeloNome(anexosDoAgente, nome);
+    return achado ? (anexosEnviadosNoTurno.get(achado.id) ?? 0) : 0;
+  };
+  /** `true` = a mensagem que leva o arquivo foi aceita pelo canal. */
+  const registrarEnvioDoAnexo = async (
+    envio: { anexo: AnexoDoAgente } | null,
+    desfecho: ChannelSendResult | null,
+  ): Promise<boolean> => {
+    if (envio === null || desfecho === null) return false;
+    if (desfecho.kind !== 'sent' && desfecho.kind !== 'already_sent' && desfecho.kind !== 'queued') {
+      return false;
+    }
+    anexosEnviadosNoTurno.set(envio.anexo.id, (anexosEnviadosNoTurno.get(envio.anexo.id) ?? 0) + 1);
+    if (desfecho.messageId) {
+      try {
+        await marcarEnvioDoAnexo(pool, {
+          tenantId,
+          messageId: desfecho.messageId,
+          anexoId: envio.anexo.id,
+          nome: envio.anexo.nome,
+        });
+      } catch (err) {
+        runLog.warn('envio do arquivo do agente não marcado na mensagem', {
+          message_id: desfecho.messageId,
+          error: (err instanceof Error ? err.message : String(err)).slice(0, 120),
+        });
+      }
+    }
+    return true;
+  };
   // Citações acumuladas por buscas de conhecimento DESTE turno — anexadas à
   // próxima outbound enviada (shape de lib/ai/citations/types, que a UI já lê).
   let pendingCitations: ReturnType<typeof citationsFromHits> = [];
@@ -2971,7 +3030,7 @@ async function executarTurnoDoAgente(
     }),
     send_message: tool({
       ...AGENT_TOOL_DEFS.send_message,
-      execute: async ({ body, produto_codigo }) => {
+      execute: async ({ body, produto_codigo, anexo }) => {
         // CORPO VAZIO NÃO SAI. Medido ao vivo (2026-09-19): o `gpt-4o-mini`
         // chamou `send_message` várias vezes com corpo que virou vazio e o
         // WhatsApp do cliente recebeu bolhas em branco. O schema garante
@@ -3069,6 +3128,49 @@ async function executarTurnoDoAgente(
           }
           fotosDoProduto = preparadas.fotos;
           fotosQueFaltaram = preparadas.tinha - preparadas.fotos.length;
+        }
+        // O arquivo do agente (0500): mesmo molde da foto — preparado ANTES da cadeia
+        // e fora do lock do número. Nome errado, teto de envios atingido ou cópia que
+        // falhou voltam ao modelo como erro de ensino, sem enviar nada.
+        let anexoDoEnvio: { anexo: AnexoDoAgente; media: FotoParaEnvio } | null = null;
+        let desfechoDoAnexo: ChannelSendResult | null = null;
+        if (anexo !== undefined && anexo.trim() !== '' && !preview) {
+          if (fotosDoProduto.length > 0) {
+            return {
+              ok: false,
+              error: {
+                code: 'anexo_com_produto',
+                message:
+                  'use `anexo` OU `produto_codigo`, não os dois na mesma mensagem. Envie de novo com um só.',
+              },
+            };
+          }
+          let preparado;
+          try {
+            preparado = await prepararAnexo(pool, copiarAnexoNoStorage(runLog), {
+              tenantId,
+              conversationId: input.conversationId,
+              anexos: anexosDoAgente,
+              nome: anexo,
+              enviadosNoTurno: acharEnviosNoTurno(anexo),
+            });
+          } catch (err) {
+            runLog.warn('arquivo do agente não preparado', {
+              detalhe: (err instanceof Error ? err.message : String(err)).slice(0, 120),
+            });
+            return {
+              ok: false,
+              error: {
+                code: 'anexo_indisponivel',
+                message:
+                  'o arquivo não pôde ser preparado agora. Envie só o texto, sem `anexo`, e NÃO diga ao cliente que mandou o arquivo.',
+              },
+            };
+          }
+          if (!preparado.ok) {
+            return { ok: false, error: { code: preparado.code, message: preparado.message } };
+          }
+          anexoDoEnvio = { anexo: preparado.anexo, media: preparado.media };
         }
         // F4-04: sinaliza (independente do gate F4-01/F4-08) se ESTA candidata é uma
         // promessa fora de tabela — usado só para correlacionar com o jailbreak no fim do
@@ -3236,6 +3338,31 @@ async function executarTurnoDoAgente(
               // do turno (a checagem de `max_sends_per_turn` acima roda uma vez, antes).
               // O resto é medido ANTES DE CADA FOTO, depois do texto: o texto acima do
               // teto de legenda sai à parte e também gasta o teto.
+              if (anexoDoEnvio !== null) {
+                return enviarComAnexo(
+                  finalBody,
+                  { kind: anexoDoEnvio.anexo.kind, media: anexoDoEnvio.media },
+                  {
+                    sleep,
+                    jitter,
+                    restantes: () => maxSendsPerTurn - seq,
+                    enviarArquivo: (media, legenda) => enviar(legenda, media),
+                    aoEnviarArquivo: (desfecho) => {
+                      desfechoDoAnexo = desfecho;
+                    },
+                    enviarTexto: (texto) =>
+                      sendInBubbles(texto, {
+                        enabled: agentConfig?.splitMessages ?? false,
+                        maxChars: agentConfig?.splitMaxChars ?? 600,
+                        // Guarda uma vaga do teto do turno para o arquivo que vem depois.
+                        maxBubbles: Math.max(1, maxSendsPerTurn - seq - 1),
+                        sleep,
+                        jitter,
+                        send: (bubble) => enviar(bubble),
+                      }),
+                  },
+                );
+              }
               return enviarComFotos(finalBody, fotosDoProduto, {
                 sleep,
                 jitter,
@@ -3370,6 +3497,15 @@ async function executarTurnoDoAgente(
             }
             pendingCitations = [];
           }
+          // O arquivo saiu? Marca a mensagem que o levou — é o que o teto de envios
+          // por conversa conta. A marca no turno cobre o canal em fila (sem id ainda).
+          const arquivoSaiu = await registrarEnvioDoAnexo(anexoDoEnvio, desfechoDoAnexo);
+          const avisoDoAnexo =
+            anexoDoEnvio !== null && !arquivoSaiu
+              ? {
+                  aviso: `o arquivo "${anexoDoEnvio.anexo.nome}" NÃO foi enviado; só o texto foi. Não diga ao cliente que mandou o arquivo.`,
+                }
+              : {};
           switch (outcome.kind) {
             case 'sent':
             case 'already_sent':
@@ -3377,6 +3513,8 @@ async function executarTurnoDoAgente(
                 ok: true,
                 status: 'enviada',
                 message_id: outcome.messageId,
+                ...(anexoDoEnvio !== null ? { arquivo_enviado: arquivoSaiu } : {}),
+                ...avisoDoAnexo,
                 ...(produto_codigo !== undefined ? { fotos_enviadas: fotosDoProduto.length } : {}),
                 ...(fotosQueFaltaram > 0
                   ? {
@@ -3388,6 +3526,7 @@ async function executarTurnoDoAgente(
               return {
                 ok: true,
                 status: 'aceita_aguardando_canal',
+                ...(anexoDoEnvio !== null ? { arquivo_enviado: arquivoSaiu } : {}),
                 message:
                   'o canal aceitou a mensagem e vai enviá-la quando a sessão voltar — não reenvie.',
               };

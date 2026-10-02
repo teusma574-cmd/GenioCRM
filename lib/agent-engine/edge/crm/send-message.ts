@@ -63,8 +63,21 @@ export interface SendMessageInput {
    * colidirem no ledger e o segundo virar `already_sent` sem ter saído.
    */
   template?: { name: string; language: string; values: Record<string, string> };
-  /** Presente = imagem da pasta da conversa em `whatsapp-media`; `body` é a legenda. */
+  /** Presente = arquivo (imagem, áudio ou documento) da pasta da conversa em `whatsapp-media`; `body` é a legenda. */
   media?: { storagePath: string; mime: string };
+}
+
+/**
+ * O `type` da mensagem a partir do mime do arquivo. A foto do catálogo é sempre
+ * imagem; os arquivos do agente (migration 0500) também podem ser áudio ou PDF,
+ * e o `type` decide o endpoint do canal — áudio mandado como `image` não chega.
+ */
+export function tipoDaMidia(mime: string): 'image' | 'audio' | 'video' | 'document' {
+  const base = (mime || '').split(';')[0]!.trim().toLowerCase();
+  if (base.startsWith('image/')) return 'image';
+  if (base.startsWith('audio/')) return 'audio';
+  if (base.startsWith('video/')) return 'video';
+  return 'document';
 }
 
 /**
@@ -87,7 +100,7 @@ export function corpoDoEnvio(
         }
       : input.media
         ? {
-            type: 'image' as const,
+            type: tipoDaMidia(input.media.mime),
             media_storage_path: input.media.storagePath,
             media_mime: input.media.mime,
           }

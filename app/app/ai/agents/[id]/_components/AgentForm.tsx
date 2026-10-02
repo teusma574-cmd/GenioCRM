@@ -53,6 +53,7 @@ import {
 } from "./FollowupWindowEditor";
 import { PainelDoOperador } from "./PainelDoOperador";
 import { PainelDeSeguranca } from "./PainelDeSeguranca";
+import { AnexosDoAgente } from "./AnexosDoAgente";
 import { BasesDoAgente, type MaterialDoAcervo } from "./BasesDoAgente";
 import { FunisDoAgente, type CoberturaPorFunil } from "./FunisDoAgente";
 import { PublishConfirmDialog } from "./PublishConfirmDialog";
@@ -468,6 +469,7 @@ export function AgentForm(props: Props) {
     //
     // Quem cobra o número é `bloqueioDePublicacao` (logo abaixo): sem ele o
     // agente não vai ao ar, e o botão "Publicar" explica o que falta.
+    // Guarda técnica de input, não regra de produto: o alerta de 27 mora no ToolPicker.
     if (form.tool_ids.length > TETO_TOOLS_POR_AGENTE)
       errors.tool_ids = `${t("Máximo de")} ${TETO_TOOLS_POR_AGENTE} ${t("capacidades por agente.")}`;
 
@@ -1224,6 +1226,10 @@ export function AgentForm(props: Props) {
             onChange={(ids) => patch({ knowledge_source_ids: ids })}
             disabled={disabled}
           />
+
+          {/* Os arquivos que este assistente pode enviar (0500) — salva na hora,
+              então só existe em agente já criado. */}
+          {props.mode === "edit" ? <AnexosDoAgente agentId={props.agent.id} /> : null}
 
           {/* Triggers */}
           <Card className="space-y-2 p-4">

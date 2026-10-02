@@ -80,7 +80,27 @@ import { entraPorPacote, type ToolBundle, type ToolRisk } from "./pacotes";
  * que o bloco ⚠️ acima diz. O dia em que o `evoluir` exigir 28, o passo volta a
  * ser ele.
  */
-export const TETO_TOOLS_POR_AGENTE = 27;
+export const ALERTA_TOOLS_POR_AGENTE = 27;
+
+/**
+ * ═══ 27 deixou de ser TETO e virou ALERTA (fork desta instalação, 2026-10-02) ═══
+ *
+ * Decisão do dono desta instalação: não há mais limite duro de capacidades. O
+ * agente pode ligar o catálogo inteiro; a partir de `ALERTA_TOOLS_POR_AGENTE`
+ * (27, o antigo teto) a tela AVISA que o modelo pode errar a escolha da
+ * ferramenta — a mesma heurística de degradação descrita acima, agora como
+ * informação e não como recusa.
+ *
+ * `TETO_TOOLS_POR_AGENTE` continua existindo só como guarda técnica de input
+ * (ninguém manda uma lista de 10 mil ids ao servidor). Fica bem acima do
+ * catálogo (70 hoje) de propósito: nenhum caminho de produto encosta nele.
+ */
+export const TETO_TOOLS_POR_AGENTE = 200;
+
+/** A partir daqui a tela avisa que o agente pode errar a escolha da ferramenta. */
+export function passouDoAlerta(selecionadas: ReadonlyArray<string>): boolean {
+  return selecionadas.length >= ALERTA_TOOLS_POR_AGENTE;
+}
 
 /** O mínimo que a regra precisa saber de uma capacidade. */
 export interface CapacidadeSelecionavel {

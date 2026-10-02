@@ -29,6 +29,7 @@ import {
   type ToolRisk,
 } from "@/lib/mcp/tools/pacotes";
 import {
+  ALERTA_TOOLS_POR_AGENTE,
   TETO_TOOLS_POR_AGENTE,
   capacidadesAutomaticasDoPacote,
   capacidadesCriticasDoPacote,
@@ -37,6 +38,7 @@ import {
   ligarPacote,
   vagasExigidasPeloPacote,
   textoDaContagem,
+  passouDoAlerta,
   vagasRestantes,
   type CapacidadeSelecionavel,
 } from "@/lib/mcp/tools/selecao-por-pacote";
@@ -224,6 +226,7 @@ export function ToolPicker({ value: valorSalvo, onChange, disabled, ocultar }: P
 
   const vagas = vagasRestantes(value);
   const cheio = vagas <= 0;
+  const alerta = passouDoAlerta(value);
 
   /** Ids salvos que o servidor não oferece mais — some da tela seria mentir. */
   const orfas = value.filter((id) => !porNome.has(id) && !desligadasPelaOrg.has(id));
@@ -306,19 +309,30 @@ export function ToolPicker({ value: valorSalvo, onChange, disabled, ocultar }: P
 
   return (
     <div className="space-y-4" data-testid="tool-picker">
-      {/* Consumo do teto — o número que impede a surpresa no salvar. */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 bg-muted/30 p-3">
+      {/* Sem teto: a partir de ALERTA_TOOLS_POR_AGENTE a tela avisa, não recusa. */}
+      <div
+        className={
+          alerta
+            ? "flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning/40 bg-warning-bg p-3"
+            : "flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 bg-muted/30 p-3"
+        }
+      >
         <p className="text-sm">
-          <strong data-testid="consumo-teto">
-            {value.length} {t("de")} {TETO_TOOLS_POR_AGENTE}
-          </strong>{" "}
-          {t("capacidades ligadas")}
+          <strong data-testid="consumo-teto">{value.length}</strong> {t("capacidades ligadas")}
         </p>
-        <p className="text-xs text-muted-foreground">
-          {cheio
-            ? t("Limite atingido. Desligue algo para ligar outra coisa.")
-            : t("Acima disso o agente erra na hora de escolher o que usar.")}
-        </p>
+        {alerta ? (
+          <p className="text-xs font-medium text-warning-fg" role="alert" data-testid="alerta-capacidades">
+            {t("Atenção: com")} {ALERTA_TOOLS_POR_AGENTE}{" "}
+            {t(
+              "capacidades ou mais o agente pode errar na hora de escolher o que usar. Deixe ligado só o que ele realmente precisa.",
+            )}
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            {t("A partir de")} {ALERTA_TOOLS_POR_AGENTE}{" "}
+            {t("capacidades o agente pode errar na hora de escolher o que usar.")}
+          </p>
+        )}
       </div>
 
       {recusa && recusa.pacote === null ? <AvisoTeto texto={recusa.texto} /> : null}

@@ -75,7 +75,7 @@ services:
       traefik.docker.network: "${TRAEFIK_NETWORK:-traefik}"
 
       # Rota principal — equivale ao `reverse_proxy app:3000` do Caddyfile.
-      traefik.http.routers.deskcomm.rule: "Host(`${DOMAIN}`) || Host(`${DOMAIN_ALT}`)"
+      traefik.http.routers.deskcomm.rule: "Host(`${DOMAIN}`)"
       traefik.http.routers.deskcomm.entrypoints: "${TRAEFIK_ENTRYPOINT:-websecure}"
       traefik.http.routers.deskcomm.tls.certresolver: "${TRAEFIK_CERTRESOLVER:-letsencrypt}"
       traefik.http.routers.deskcomm.middlewares: "deskcomm-compress"
@@ -96,7 +96,7 @@ services:
       # real tem. Toda requisição àquele caminho cai fora da lista e recebe 403,
       # que é exatamente o comportamento desejado. A prioridade alta é o que faz
       # esta rota vencer a principal, que casaria o mesmo Host.
-      traefik.http.routers.deskcomm-waha-block.rule: "(Host(`${DOMAIN}`) || Host(`${DOMAIN_ALT}`)) && Path(`/api/v1/webhooks/waha`)"
+      traefik.http.routers.deskcomm-waha-block.rule: "Host(`${DOMAIN}`) && Path(`/api/v1/webhooks/waha`)"
       traefik.http.routers.deskcomm-waha-block.entrypoints: "${TRAEFIK_ENTRYPOINT:-websecure}"
       traefik.http.routers.deskcomm-waha-block.tls.certresolver: "${TRAEFIK_CERTRESOLVER:-letsencrypt}"
       traefik.http.routers.deskcomm-waha-block.priority: "1000"
@@ -106,7 +106,7 @@ services:
 
       # HTTP -> HTTPS. O Caddy fazia isto automaticamente; no Traefik precisa ser
       # dito. Sem este router, quem digitar http:// não recebe resposta nenhuma.
-      traefik.http.routers.deskcomm-http.rule: "Host(`${DOMAIN}`) || Host(`${DOMAIN_ALT}`)"
+      traefik.http.routers.deskcomm-http.rule: "Host(`${DOMAIN}`)"
       traefik.http.routers.deskcomm-http.entrypoints: "${TRAEFIK_ENTRYPOINT_HTTP:-web}"
       traefik.http.routers.deskcomm-http.middlewares: "deskcomm-https"
       traefik.http.routers.deskcomm-http.service: "deskcomm"
