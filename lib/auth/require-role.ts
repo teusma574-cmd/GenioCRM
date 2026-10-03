@@ -7,7 +7,8 @@
  * "matriz advisória").
  *
  * Fluxo:
- *  1. `loadAuthUser()` — valida o JWT via `supabase.auth.getUser()` (nunca
+ *  1. `loadAuthUser()` — valida a ASSINATURA do JWT localmente
+ *     (`identidadeDaSessao` → `getClaims()`, chave pública cacheada; nunca
  *     `getSession()`); 401 se não autenticado.
  *  2. `resolveActiveOrg()` — org ativa de fonte confiável (cookie validado
  *     contra memberships), NUNCA do body; 403 `forbidden_tenant` se ausente.

@@ -13,6 +13,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { logger } from "@/lib/logger";
 import { createClient } from "@/lib/supabase/server";
+import { identidadeDaSessao } from "@/lib/auth/identidade-da-sessao";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { empresaExigeMfa, exigeCadastroDeMfa } from "@/lib/auth/politica-mfa";
 import { normalizarIdioma } from "@/lib/i18n/idiomas";
@@ -123,10 +124,9 @@ export function ehSessaoAusente(error: { name?: string } | null | undefined): bo
 
 export const loadAuthUser = cache(async (): Promise<AuthUser | null> => {
   const supabase = await createClient();
-  const {
-    data: { user },
-    error,
-  } = await supabase.auth.getUser();
+  // Assinatura do JWT conferida LOCALMENTE (JWKS cacheado) — sem a viagem ao
+  // GoTrue que `getUser()` fazia em toda requisição. Ver `identidade-da-sessao.ts`.
+  const { user, error } = await identidadeDaSessao(supabase.auth);
   // ⚠️ O `error` era DESCARTADO — nem chegava a ser desestruturado —, e aqui
   // `user: null` é tão ambíguo quanto o `data: null` que a query logo abaixo
   // trata com todo o cuidado: significa "não está logado" (estado normal) E
@@ -171,31 +171,43 @@ export const loadAuthUser = cache(async (): Promise<AuthUser | null> => {
   // ⚠️ `ORDER BY` NÃO É ENFEITE AQUI: esta lista decide QUAL ORGANIZAÇÃO FICA
   // ATIVA para quem não tem o cookie `active_org` — `resolveActiveOrg` pega
   // `organizations[0]`. Sem ordenação, "a primeira" é o que o Postgres devolver.
-  const [{ data: paRow, error: paErro }, { data: rawMemberships, error: membErro }] =
-    await Promise.all([
-      supabase
-        .from("platform_admins")
-        .select("user_id, revoked_at")
-        .eq("user_id", user.id)
-        .is("revoked_at", null)
-        .maybeSingle(),
-      supabase
-        .from("user_organizations")
-        .select(
-          // Dois embeds do MESMO `organizations`, como manda o PostgREST quando a
-          // mesma relação aparece duas vezes: `organizations(...)` continua sendo
-          // o que a membership sempre trouxe (nome, IDIOMA e FUSO da empresa — o
-          // idioma decide a tela inteira e não pode depender de um embed que a
-          // issue #1341 acabou de engordar), e o alias traz só as portas da EMPRESA.
-          // `timezone` veio do main (fuso da organização nas listas, #1290) e convive
-          // com o alias: um embed por relação, sem renomear o que já existia.
-          "organization_id, role, interface_settings, accepted_at, organizations(display_name, locale, timezone, currency, country), interface_da_empresa:organizations(interface_settings)",
-        )
-        .eq("user_id", user.id)
-        .is("revoked_at", null)
-        .order("accepted_at", { ascending: true, nullsFirst: true })
-        .order("organization_id", { ascending: true }),
-    ]);
+  //
+  // O contexto de acompanhamento (`fn_support_context`) entra na MESMA rodada:
+  // ele não depende das memberships, e deixá-lo depois somava uma terceira
+  // viagem ao banco em toda requisição. A precedência dos erros é preservada
+  // abaixo — permissão indisponível fala antes de acompanhamento indisponível.
+  const [
+    { data: paRow, error: paErro },
+    { data: rawMemberships, error: membErro },
+    suporte,
+  ] = await Promise.all([
+    supabase
+      .from("platform_admins")
+      .select("user_id, revoked_at")
+      .eq("user_id", user.id)
+      .is("revoked_at", null)
+      .maybeSingle(),
+    supabase
+      .from("user_organizations")
+      .select(
+        // Dois embeds do MESMO `organizations`, como manda o PostgREST quando a
+        // mesma relação aparece duas vezes: `organizations(...)` continua sendo
+        // o que a membership sempre trouxe (nome, IDIOMA e FUSO da empresa — o
+        // idioma decide a tela inteira e não pode depender de um embed que a
+        // issue #1341 acabou de engordar), e o alias traz só as portas da EMPRESA.
+        // `timezone` veio do main (fuso da organização nas listas, #1290) e convive
+        // com o alias: um embed por relação, sem renomear o que já existia.
+        "organization_id, role, interface_settings, accepted_at, organizations(display_name, locale, timezone, currency, country), interface_da_empresa:organizations(interface_settings)",
+      )
+      .eq("user_id", user.id)
+      .is("revoked_at", null)
+      .order("accepted_at", { ascending: true, nullsFirst: true })
+      .order("organization_id", { ascending: true }),
+    readSupportContext(supabase).then(
+      (valor) => ({ valor, erro: null as unknown }),
+      (erro: unknown) => ({ valor: null, erro }),
+    ),
+  ]);
 
   /**
    * FALHA ALTO, não baixo.
@@ -250,7 +262,8 @@ export const loadAuthUser = cache(async (): Promise<AuthUser | null> => {
     };
   });
 
-  const support = await readSupportContext(supabase);
+  if (suporte.erro) throw suporte.erro;
+  const support = suporte.valor;
   const fullName = (user.user_metadata?.full_name as string | undefined) ?? null;
   const avatarUrl = (user.user_metadata?.avatar_url as string | undefined) ?? null;
   const locale = (user.user_metadata?.locale as string | undefined) ?? null;

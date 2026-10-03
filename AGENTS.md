@@ -42,8 +42,8 @@ Playwright 1 · Sentry 11 · WAHA 2026.7.2 (engine NOWEB) · Upstash Redis · Ve
   (`fn_user_org_ids()`/`fn_user_role_in_org()`), a mesma função SECURITY DEFINER que o RBAC de
   aplicação usa. Schema versionado em `supabase/migrations/`; o que o self-host aplica é
   `supabase/baseline.sql`.
-- **Auth** — Supabase Auth + `@supabase/ssr`, cookie `SameSite=Strict`. Sempre `getUser()` no
-  server; **nunca** `getSession()`. MFA TOTP é opcional e ligado por quem administra
+- **Auth** — Supabase Auth + `@supabase/ssr`, cookie `SameSite=Strict`. Identidade por
+  `identidadeDaSessao()` (`getClaims()`, assinatura conferida localmente); **nunca** `getSession()`. MFA TOTP é opcional e ligado por quem administra
   (duas políticas que somam: plataforma e organização), regra pura em
   `lib/auth/politica-mfa.ts`.
 - **Filas** — event sourcing leve: `event_log` + workers drenados por cron. Trigger Postgres
@@ -467,7 +467,7 @@ itens envelhecem em ritmos diferentes, e o cabeçalho passava a mentir por todos
 
 ## Regras de segurança
 
-- Sempre `getUser()` no backend. **Nunca `getSession()`** (confia no cookie sem revalidar).
+- Identidade da sessão por `identidadeDaSessao()` (`getClaims()`, assinatura conferida localmente). **Nunca `getSession()`** (confia no cookie sem revalidar).
 - API key/token **nunca** em query string — só header. Plaintext do bearer é mostrado
   **uma vez**; no banco só hash SHA256.
 - HMAC de webhook com `crypto.timingSafeEqual`. Fail-closed quando o secret falta.

@@ -5,6 +5,7 @@ import { env } from "@/lib/env";
 import { fetchDoServidor } from "@/lib/supabase/fetch-do-servidor";
 import { urlDoSupabaseNoServidor } from "@/lib/supabase/url-do-servidor";
 import { isPublicPath } from "@/lib/auth/public-paths";
+import { identidadeDaSessao } from "@/lib/auth/identidade-da-sessao";
 import {
   verifyImpersonateCookieEdge,
   IMPERSONATE_COOKIE_NAME_EDGE,
@@ -83,10 +84,13 @@ export async function proxy(request: NextRequest) {
     },
   );
 
-  // Validate JWT server-side (NEVER use getSession on backend per CLAUDE.md).
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // Validate the JWT server-side — signature checked LOCALLY against the
+  // project's public key (JWKS, cached), with the same session refresh
+  // `getUser()` did. NEVER `getSession()` (trusts the cookie). This proxy runs
+  // on EVERY request: the GoTrue round-trip it used to make here was one of
+  // the two auth round-trips every API call paid before touching any data.
+  // See `lib/auth/identidade-da-sessao.ts`.
+  const { user } = await identidadeDaSessao(supabase.auth);
 
   if (!user) {
     // API routes must respond with JSON envelope (contract: {error:{code,message}})
