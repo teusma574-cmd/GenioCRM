@@ -68,6 +68,7 @@ import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
 import { abreAvisoDoEspelhoRecusado, mirrorLeadStageToCrm } from '../edge/crm/move-lead-stage';
 import { insertInboxItem } from '../db/repository';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { contatoComNegocioEncerrado } from '@/lib/leads/negocio-encerrado';
 import { moverLeadParaEtapaDeHandoff } from '@/lib/leads/handoff-stage-move';
 import { detectUrgencySignal } from '../guardrails/sinal-de-urgencia';
 import { buildNativeMediaParts } from './media-parts';
@@ -1894,6 +1895,13 @@ async function executarTurnoDoAgente(
   // do force_human do CRM) e só o humano/CRM libera — o agente nunca reassume (regra dura 2).
   if (!preview && (await isLeadInHandoff(pool, tenantId, leadId))) {
     runLog.info('turno pulado — lead em handoff humano (bot silenciado)', { kind: liveJob().kind });
+    return;
+  }
+  // Negócio ganho/perdido sem outro em aberto: a IA não fala mais com o contato.
+  // Checagem DURA (falha fechada), ao lado do handoff — a de elegibilidade logo
+  // abaixo lê a mesma regra, mas degrada aberta em erro de consulta.
+  if (!preview && (await contatoComNegocioEncerrado(pool, tenantId, leadId))) {
+    runLog.info('turno pulado — negócio encerrado (ganho/perdido)', { kind: liveJob().kind });
     return;
   }
 
@@ -4910,6 +4918,13 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
     // a IA de sempre e o Jev que elas poupam numa conversa calada.
     if (await isLeadInHandoff(pool, job.organization_id, job.contact_id)) {
       deps.log.info('turno pulado — lead em handoff humano (bot silenciado)', {
+        job_id: job.id,
+        conversation_id: payload.conversation_id,
+      });
+      return;
+    }
+    if (await contatoComNegocioEncerrado(pool, job.organization_id, job.contact_id)) {
+      deps.log.info('turno pulado — negócio encerrado (ganho/perdido)', {
         job_id: job.id,
         conversation_id: payload.conversation_id,
       });

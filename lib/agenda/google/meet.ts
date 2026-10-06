@@ -110,6 +110,7 @@ export const meetingDeliveryErrors: Record<string, string> = {
   force_human: "O contato está em atendimento humano. O responsável pode autorizar este link pelo botão de envio, sem ativar a IA.",
   conversa_silenciada: "A IA está silenciada neste atendimento. O responsável pode autorizar somente este link pelo botão de envio.",
   conversa_de_humano: "Este atendimento está atribuído a uma pessoa. O responsável pode autorizar somente este link pelo botão de envio.",
+  negocio_encerrado: "O negócio deste contato está ganho ou perdido, e a IA não envia mais mensagens a ele. O responsável pode autorizar somente este link pelo botão de envio.",
   sem_autorizacao: "O contato não está autorizado para atendimento automático. O responsável pode autorizar somente este link pelo botão de envio.",
   autorizacao_expirada: "A autorização de atendimento automático expirou. O responsável pode autorizar somente este link pelo botão de envio.",
   limits: "O envio atingiu uma janela ou limite do canal. Aguarde a liberação antes de tentar novamente.",

@@ -8,6 +8,8 @@
  */
 import type pg from "pg";
 
+import { sqlNegocioEncerrado } from "@/lib/leads/negocio-encerrado";
+
 import {
   decidirElegibilidade,
   montarEstadoDeElegibilidade,
@@ -21,6 +23,7 @@ interface LinhaDeElegibilidade {
   bot_silenced_until: Date | string | null;
   ai_authorized_at: Date | string | null;
   phone_number: string | null;
+  negocio_encerrado: boolean | null;
 }
 
 /**
@@ -38,7 +41,8 @@ export async function decidirElegibilidadeDaConversa(
        cv.assignee_kind             as assignee_kind,
        cv.bot_silenced_until        as bot_silenced_until,
        ct.ai_authorized_at          as ai_authorized_at,
-       ct.phone_number              as phone_number
+       ct.phone_number              as phone_number,
+       ${sqlNegocioEncerrado("cv.organization_id", "cv.contact_id")} as negocio_encerrado
      from conversations cv
      join contacts ct
        on ct.id = cv.contact_id and ct.organization_id = cv.organization_id
@@ -58,6 +62,7 @@ export async function decidirElegibilidadeDaConversa(
       contactPhoneNumber: r.phone_number,
       forceHuman: r.force_human,
       assigneeKind: r.assignee_kind,
+      negocioEncerrado: r.negocio_encerrado,
       botSilencedUntil: r.bot_silenced_until,
       aiAuthorizedAt: r.ai_authorized_at,
       agora: input.agora,

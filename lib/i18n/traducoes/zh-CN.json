@@ -5248,6 +5248,7 @@
   "Este atendimento está atribuído a uma pessoa. O responsável pode autorizar somente este link pelo botão de envio.": "此接待已分配给某人。负责人可通过发送按钮仅授权此链接。",
   "O contato não está autorizado para atendimento automático. O responsável pode autorizar somente este link pelo botão de envio.": "该联系人未获自动接待授权。负责人可通过发送按钮仅授权此链接。",
   "A autorização de atendimento automático expirou. O responsável pode autorizar somente este link pelo botão de envio.": "自动接待授权已过期。负责人可通过发送按钮仅授权此链接。",
+  "O negócio deste contato está ganho ou perdido, e a IA não envia mais mensagens a ele. O responsável pode autorizar somente este link pelo botão de envio.": "该联系人的商机已赢单或丢单，AI 不再向其发送消息。负责人可通过发送按钮仅授权此链接。",
   "O envio atingiu uma janela ou limite do canal. Aguarde a liberação antes de tentar novamente.": "发送已达到渠道的时间窗口或限制。请等待解除限制后再重试。",
   "Uma regra de envio impediu a mensagem. Confira o aviso na Central antes de tentar novamente.": "发送规则阻止了消息。请先查看通知中心中的提醒，再重试。",
   "Sua reunião está marcada para": "您的会议已安排在",

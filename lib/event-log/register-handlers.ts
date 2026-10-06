@@ -26,6 +26,7 @@ import { webPushInboundHandler } from "@/lib/notifications/push.handler";
 import { conversaoDeQualificacaoHandler } from "@/lib/conversoes/qualificacao.handler";
 import { conversaoDeVendaHandler } from "@/lib/conversoes/envio.handler";
 import { avisoDeEtapaHandler } from "@/lib/leads/aviso-de-etapa.handler";
+import { negocioEncerradoHandler } from "@/lib/leads/negocio-encerrado.handler";
 import { avisoDeCasoAoSuporteHandler } from "@/lib/escalacao/aviso-ao-suporte.handler";
 import { avisoDePropostaNoWhatsAppHandler } from "@/lib/propostas/aviso-no-whatsapp.handler";
 import { registerHandler } from "@/lib/event-log/dispatcher";
@@ -56,6 +57,9 @@ export function ensureHandlersRegistered(): void {
   // Escrita curta no banco (um item na Central), vizinha do gatilho de etapa
   // que consome o mesmo evento.
   registerHandler(avisoDeEtapaHandler);
+  // Negócio ganho/perdido: cancela follow-ups e retornos do contato. Escrita
+  // curta no banco, sem rede de terceiro.
+  registerHandler(negocioEncerradoHandler);
   registerHandler(followupGatilhoLeadHandler);
   registerHandler(followupGatilhoCasoHandler);
   // O caso aberto na Central, na hora — escrita curta no banco (um item), ao

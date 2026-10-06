@@ -63,6 +63,11 @@ export interface EstadoDeElegibilidade {
   botSilencedUntil: Date | number | null;
   /** `conversations.assignee_kind` — `'user'` = uma pessoa é a dona do thread. */
   assigneeKind: string | null;
+  /**
+   * O contato tem negócio ganho/perdido e nenhum em aberto
+   * (`lib/leads/negocio-encerrado.ts`). Ausente = não encerrado.
+   */
+  negocioEncerrado?: boolean;
   /** `contacts.ai_authorized_at`. `null` = nunca autorizado. */
   aiAuthorizedAt: Date | null;
   /** O allowlist representa o período de teste deste canal. */
@@ -80,6 +85,7 @@ export type MotivoDeElegibilidade =
   | "force_human"
   | "conversa_silenciada"
   | "conversa_de_humano"
+  | "negocio_encerrado"
   | "fora_da_lista_de_teste"
   | "numero_de_teste"
   | "sem_autorizacao"
@@ -118,6 +124,11 @@ export function decidirElegibilidade(e: EstadoDeElegibilidade): DecisaoDeElegibi
   }
   if (e.assigneeKind === "user") {
     return { permite: false, motivo: "conversa_de_humano", bloqueioPorAllowlist: false };
+  }
+  // Negócio ganho ou perdido, sem outro em aberto: a IA não fala mais com o
+  // contato — nem resposta, nem follow-up. Vale com o gate aberto também.
+  if (e.negocioEncerrado === true) {
+    return { permite: false, motivo: "negocio_encerrado", bloqueioPorAllowlist: false };
   }
 
   if (e.modo === "open") {
@@ -184,6 +195,7 @@ export function montarEstadoDeElegibilidade(raw: {
   contactPhoneNumber?: string | null;
   forceHuman: unknown;
   assigneeKind: string | null;
+  negocioEncerrado?: unknown;
   botSilencedUntil: Date | string | number | null | undefined;
   aiAuthorizedAt: Date | string | null | undefined;
   agora: Date;
@@ -198,6 +210,7 @@ export function montarEstadoDeElegibilidade(raw: {
     forceHuman: raw.forceHuman === true,
     botSilencedUntil: normalizarInstante(raw.botSilencedUntil),
     assigneeKind: raw.assigneeKind,
+    negocioEncerrado: raw.negocioEncerrado === true,
     aiAuthorizedAt: autorizadoEm instanceof Date ? autorizadoEm : null,
     preGoLiveAtivo: preGoLive,
     numeroDeTesteAutorizado:

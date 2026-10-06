@@ -23,6 +23,8 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { contatoComNegocioEncerradoViaSupabase } from "@/lib/leads/negocio-encerrado";
+
 import {
   decidirElegibilidade,
   montarEstadoDeElegibilidade,
@@ -30,6 +32,7 @@ import {
 } from "./gate";
 
 interface ConversaEmbed {
+  contact_id: string | null;
   bot_silenced_until: string | null;
   assignee_kind: string | null;
   contacts: {
@@ -51,7 +54,7 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
   const { data, error } = await admin
     .from("conversations")
     .select(
-      "bot_silenced_until, assignee_kind, contacts:contact_id(force_human, ai_authorized_at, phone_number), channel_sessions:channel_session_id(metadata)",
+      "contact_id, bot_silenced_until, assignee_kind, contacts:contact_id(force_human, ai_authorized_at, phone_number), channel_sessions:channel_session_id(metadata)",
     )
     .eq("organization_id", input.organizationId)
     .eq("id", input.conversationId)
@@ -63,6 +66,12 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
   if (data == null) return null;
 
   const row = data as unknown as ConversaEmbed;
+  // Erro aqui também vira exceção: negócio ganho/perdido cala a IA, e não saber
+  // se o negócio fechou é motivo para não responder (fail-closed, ver cabeçalho).
+  const negocioEncerrado =
+    row.contact_id == null
+      ? false
+      : await contatoComNegocioEncerradoViaSupabase(admin, input.organizationId, row.contact_id);
   return decidirElegibilidade(
     montarEstadoDeElegibilidade({
       aiGate: row.channel_sessions?.metadata?.["ai_gate"] ?? null,
@@ -71,6 +80,7 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
       contactPhoneNumber: row.contacts?.phone_number ?? null,
       forceHuman: row.contacts?.force_human ?? false,
       assigneeKind: row.assignee_kind,
+      negocioEncerrado,
       botSilencedUntil: row.bot_silenced_until,
       aiAuthorizedAt: row.contacts?.ai_authorized_at ?? null,
       agora: input.agora,

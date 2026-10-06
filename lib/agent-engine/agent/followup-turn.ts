@@ -44,6 +44,10 @@ import {
   type LeadCheckpointRow,
 } from './inbound-turn';
 import { isLeadInHandoff } from './human-handoff';
+import {
+  cancelarFollowupsDoContato,
+  contatoComNegocioEncerrado,
+} from '@/lib/leads/negocio-encerrado';
 import { fusoDaOrganizacao } from './fuso-da-org';
 import {
   followupPublicadoDoEnrollment,
@@ -259,6 +263,20 @@ export function createFollowupTurnHandler(deps: FollowupTurnDeps) {
       throw new Error('job followup_turn sem contact_id — o CHECK da fila deveria impedir');
     }
     const payload = followupTurnPayloadSchema.parse(job.payload);
+
+    // Negócio ganho/perdido sem outro em aberto: nenhum follow-up sai — nem de
+    // fluxo, nem retorno prometido, nem re-entrada por modelo. Antes de qualquer
+    // outra leitura, e cancelando o que ainda estava vivo para o contato: a
+    // inscrição cancelada não espera `completeFollowupTurn` (o motor não a
+    // reivindica mais), então sair daqui não deixa nada pendurado.
+    if (await contatoComNegocioEncerrado(pool, tenantId, leadId)) {
+      const cancelados = await cancelarFollowupsDoContato(pool, tenantId, leadId);
+      withFields(deps.log, { job_id: job.id, tenant_id: tenantId, lead_id: leadId }).info(
+        'follow-up pulado — negócio encerrado (ganho/perdido)',
+        { inscricoes_canceladas: cancelados.inscricoes, retornos_cancelados: cancelados.retornos },
+      );
+      return;
+    }
 
     const boundary = parseServiceBoundary(job.payload.service_boundary);
     await requireCurrentServiceBoundary(pool, boundary);
