@@ -1,0 +1,675 @@
+From 6ad7bf8dd765f17ec7a961603a87137129c7ceb0 Mon Sep 17 00:00:00 2001
+From: Mateus <teusma574@gmail.com>
+Date: Tue, 6 Oct 2026 19:30:33 -0300
+Subject: [PATCH] =?UTF-8?q?feat(ia):=20neg=C3=B3cio=20ganho=20ou=20perdido?=
+ =?UTF-8?q?=20cala=20a=20IA=20e=20cancela=20follow-ups?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Quando o contato tem negócio ganho/perdido e nenhum em aberto, a IA não
+responde mais nem dispara follow-ups ou retornos agendados. Regra lida na
+hora (gate de elegibilidade + início dos turnos inbound e follow-up) e
+faxina do que estava agendado em lead.won / lead.lost.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Gc32xXmKfrMRy8BTmTK6ts
+---
+ .changes/ia-para-em-negocio-encerrado.md  |  11 ++
+ lib/agenda/google/meet.ts                 |   1 +
+ lib/agent-engine/agent/followup-turn.ts   |  18 +++
+ lib/agent-engine/agent/inbound-turn.ts    |  15 ++
+ lib/ai/elegibilidade/consulta-pg.ts       |   7 +-
+ lib/ai/elegibilidade/consulta-supabase.ts |  12 +-
+ lib/ai/elegibilidade/gate.ts              |  13 ++
+ lib/event-log/register-handlers.ts        |   4 +
+ lib/i18n/dicionario.ts                    |   1 +
+ lib/i18n/traducoes/zh-CN.json             |   1 +
+ lib/leads/negocio-encerrado.handler.ts    |  65 ++++++++
+ lib/leads/negocio-encerrado.test.ts       |  82 ++++++++++
+ lib/leads/negocio-encerrado.ts            | 178 ++++++++++++++++++++++
+ 13 files changed, 406 insertions(+), 2 deletions(-)
+ create mode 100644 .changes/ia-para-em-negocio-encerrado.md
+ create mode 100644 lib/leads/negocio-encerrado.handler.ts
+ create mode 100644 lib/leads/negocio-encerrado.test.ts
+ create mode 100644 lib/leads/negocio-encerrado.ts
+
+diff --git a/.changes/ia-para-em-negocio-encerrado.md b/.changes/ia-para-em-negocio-encerrado.md
+new file mode 100644
+index 0000000..68fce72
+--- /dev/null
++++ b/.changes/ia-para-em-negocio-encerrado.md
+@@ -0,0 +1,11 @@
++---
++impacto: capacidade_nova
++secao: alterado
++titulo: A IA para de mandar mensagem quando o negócio vai para ganho ou perdido
++---
++
++Quando o negócio de um contato é movido para ganho ou perdido — pelo botão, arrastando no quadro, em lote, pela própria IA ou por automação — a IA deixa de falar com esse contato: não responde mensagens novas e não dispara follow-ups nem retornos agendados. O que já estava agendado é cancelado na hora, com o motivo "negócio encerrado".
++
++A regra vale enquanto o contato tem negócio encerrado e nenhum em aberto. Reabrir o negócio, ou criar um negócio novo em aberto para o mesmo contato, devolve o atendimento à IA. Envios feitos por pessoas pela tela, respostas aprovadas por pessoas, automações, campanhas e lembretes de agenda não mudam.
++
++Atenção: um fluxo de follow-up configurado para começar na etapa de ganho (pós-venda) deixa de enviar mensagens. Não é preciso fazer nada na instalação.
+diff --git a/lib/agenda/google/meet.ts b/lib/agenda/google/meet.ts
+index 2938341..1df36c1 100644
+--- a/lib/agenda/google/meet.ts
++++ b/lib/agenda/google/meet.ts
+@@ -110,6 +110,7 @@ export const meetingDeliveryErrors: Record<string, string> = {
+   force_human: "O contato está em atendimento humano. O responsável pode autorizar este link pelo botão de envio, sem ativar a IA.",
+   conversa_silenciada: "A IA está silenciada neste atendimento. O responsável pode autorizar somente este link pelo botão de envio.",
+   conversa_de_humano: "Este atendimento está atribuído a uma pessoa. O responsável pode autorizar somente este link pelo botão de envio.",
++  negocio_encerrado: "O negócio deste contato está ganho ou perdido, e a IA não envia mais mensagens a ele. O responsável pode autorizar somente este link pelo botão de envio.",
+   sem_autorizacao: "O contato não está autorizado para atendimento automático. O responsável pode autorizar somente este link pelo botão de envio.",
+   autorizacao_expirada: "A autorização de atendimento automático expirou. O responsável pode autorizar somente este link pelo botão de envio.",
+   limits: "O envio atingiu uma janela ou limite do canal. Aguarde a liberação antes de tentar novamente.",
+diff --git a/lib/agent-engine/agent/followup-turn.ts b/lib/agent-engine/agent/followup-turn.ts
+index 57754a4..c4e20cd 100644
+--- a/lib/agent-engine/agent/followup-turn.ts
++++ b/lib/agent-engine/agent/followup-turn.ts
+@@ -44,6 +44,10 @@ import {
+   type LeadCheckpointRow,
+ } from './inbound-turn';
+ import { isLeadInHandoff } from './human-handoff';
++import {
++  cancelarFollowupsDoContato,
++  contatoComNegocioEncerrado,
++} from '@/lib/leads/negocio-encerrado';
+ import { fusoDaOrganizacao } from './fuso-da-org';
+ import {
+   followupPublicadoDoEnrollment,
+@@ -260,6 +264,20 @@ export function createFollowupTurnHandler(deps: FollowupTurnDeps) {
+     }
+     const payload = followupTurnPayloadSchema.parse(job.payload);
+ 
++    // Negócio ganho/perdido sem outro em aberto: nenhum follow-up sai — nem de
++    // fluxo, nem retorno prometido, nem re-entrada por modelo. Antes de qualquer
++    // outra leitura, e cancelando o que ainda estava vivo para o contato: a
++    // inscrição cancelada não espera `completeFollowupTurn` (o motor não a
++    // reivindica mais), então sair daqui não deixa nada pendurado.
++    if (await contatoComNegocioEncerrado(pool, tenantId, leadId)) {
++      const cancelados = await cancelarFollowupsDoContato(pool, tenantId, leadId);
++      withFields(deps.log, { job_id: job.id, tenant_id: tenantId, lead_id: leadId }).info(
++        'follow-up pulado — negócio encerrado (ganho/perdido)',
++        { inscricoes_canceladas: cancelados.inscricoes, retornos_cancelados: cancelados.retornos },
++      );
++      return;
++    }
++
+     const boundary = parseServiceBoundary(job.payload.service_boundary);
+     await requireCurrentServiceBoundary(pool, boundary);
+     const { rows: targetRows } = await pool.query<{ channel_session_id: string; archived_at: string | null }>(
+diff --git a/lib/agent-engine/agent/inbound-turn.ts b/lib/agent-engine/agent/inbound-turn.ts
+index b187bcf..d7e673d 100644
+--- a/lib/agent-engine/agent/inbound-turn.ts
++++ b/lib/agent-engine/agent/inbound-turn.ts
+@@ -68,6 +68,7 @@ import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
+ import { abreAvisoDoEspelhoRecusado, mirrorLeadStageToCrm } from '../edge/crm/move-lead-stage';
+ import { insertInboxItem } from '../db/repository';
+ import { createAdminClient } from '@/lib/supabase/admin';
++import { contatoComNegocioEncerrado } from '@/lib/leads/negocio-encerrado';
+ import { moverLeadParaEtapaDeHandoff } from '@/lib/leads/handoff-stage-move';
+ import { detectUrgencySignal } from '../guardrails/sinal-de-urgencia';
+ import { buildNativeMediaParts } from './media-parts';
+@@ -1896,6 +1897,13 @@ async function executarTurnoDoAgente(
+     runLog.info('turno pulado — lead em handoff humano (bot silenciado)', { kind: liveJob().kind });
+     return;
+   }
++  // Negócio ganho/perdido sem outro em aberto: a IA não fala mais com o contato.
++  // Checagem DURA (falha fechada), ao lado do handoff — a de elegibilidade logo
++  // abaixo lê a mesma regra, mas degrada aberta em erro de consulta.
++  if (!preview && (await contatoComNegocioEncerrado(pool, tenantId, leadId))) {
++    runLog.info('turno pulado — negócio encerrado (ganho/perdido)', { kind: liveJob().kind });
++    return;
++  }
+ 
+   // GATE DE ELEGIBILIDADE (opt-in por canal — `metadata.ai_gate = 'allowlist'`).
+   // Segunda checagem, defesa em profundidade: o drain já barra antes de
+@@ -4915,6 +4923,13 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
+       });
+       return;
+     }
++    if (await contatoComNegocioEncerrado(pool, job.organization_id, job.contact_id)) {
++      deps.log.info('turno pulado — negócio encerrado (ganho/perdido)', {
++        job_id: job.id,
++        conversation_id: payload.conversation_id,
++      });
++      return;
++    }
+     try {
+       const elegib = await decidirElegibilidadeDaConversa(pool, {
+         organizationId: job.organization_id,
+diff --git a/lib/ai/elegibilidade/consulta-pg.ts b/lib/ai/elegibilidade/consulta-pg.ts
+index ba9f650..469a0cb 100644
+--- a/lib/ai/elegibilidade/consulta-pg.ts
++++ b/lib/ai/elegibilidade/consulta-pg.ts
+@@ -8,6 +8,8 @@
+  */
+ import type pg from "pg";
+ 
++import { sqlNegocioEncerrado } from "@/lib/leads/negocio-encerrado";
++
+ import {
+   decidirElegibilidade,
+   montarEstadoDeElegibilidade,
+@@ -21,6 +23,7 @@ interface LinhaDeElegibilidade {
+   bot_silenced_until: Date | string | null;
+   ai_authorized_at: Date | string | null;
+   phone_number: string | null;
++  negocio_encerrado: boolean | null;
+ }
+ 
+ /**
+@@ -38,7 +41,8 @@ export async function decidirElegibilidadeDaConversa(
+        cv.assignee_kind             as assignee_kind,
+        cv.bot_silenced_until        as bot_silenced_until,
+        ct.ai_authorized_at          as ai_authorized_at,
+-       ct.phone_number              as phone_number
++       ct.phone_number              as phone_number,
++       ${sqlNegocioEncerrado("cv.organization_id", "cv.contact_id")} as negocio_encerrado
+      from conversations cv
+      join contacts ct
+        on ct.id = cv.contact_id and ct.organization_id = cv.organization_id
+@@ -58,6 +62,7 @@ export async function decidirElegibilidadeDaConversa(
+       contactPhoneNumber: r.phone_number,
+       forceHuman: r.force_human,
+       assigneeKind: r.assignee_kind,
++      negocioEncerrado: r.negocio_encerrado,
+       botSilencedUntil: r.bot_silenced_until,
+       aiAuthorizedAt: r.ai_authorized_at,
+       agora: input.agora,
+diff --git a/lib/ai/elegibilidade/consulta-supabase.ts b/lib/ai/elegibilidade/consulta-supabase.ts
+index c7a504f..b0d3ccb 100644
+--- a/lib/ai/elegibilidade/consulta-supabase.ts
++++ b/lib/ai/elegibilidade/consulta-supabase.ts
+@@ -23,6 +23,8 @@
+  */
+ import type { SupabaseClient } from "@supabase/supabase-js";
+ 
++import { contatoComNegocioEncerradoViaSupabase } from "@/lib/leads/negocio-encerrado";
++
+ import {
+   decidirElegibilidade,
+   montarEstadoDeElegibilidade,
+@@ -30,6 +32,7 @@ import {
+ } from "./gate";
+ 
+ interface ConversaEmbed {
++  contact_id: string | null;
+   bot_silenced_until: string | null;
+   assignee_kind: string | null;
+   contacts: {
+@@ -51,7 +54,7 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
+   const { data, error } = await admin
+     .from("conversations")
+     .select(
+-      "bot_silenced_until, assignee_kind, contacts:contact_id(force_human, ai_authorized_at, phone_number), channel_sessions:channel_session_id(metadata)",
++      "contact_id, bot_silenced_until, assignee_kind, contacts:contact_id(force_human, ai_authorized_at, phone_number), channel_sessions:channel_session_id(metadata)",
+     )
+     .eq("organization_id", input.organizationId)
+     .eq("id", input.conversationId)
+@@ -63,6 +66,12 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
+   if (data == null) return null;
+ 
+   const row = data as unknown as ConversaEmbed;
++  // Erro aqui também vira exceção: negócio ganho/perdido cala a IA, e não saber
++  // se o negócio fechou é motivo para não responder (fail-closed, ver cabeçalho).
++  const negocioEncerrado =
++    row.contact_id == null
++      ? false
++      : await contatoComNegocioEncerradoViaSupabase(admin, input.organizationId, row.contact_id);
+   return decidirElegibilidade(
+     montarEstadoDeElegibilidade({
+       aiGate: row.channel_sessions?.metadata?.["ai_gate"] ?? null,
+@@ -71,6 +80,7 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
+       contactPhoneNumber: row.contacts?.phone_number ?? null,
+       forceHuman: row.contacts?.force_human ?? false,
+       assigneeKind: row.assignee_kind,
++      negocioEncerrado,
+       botSilencedUntil: row.bot_silenced_until,
+       aiAuthorizedAt: row.contacts?.ai_authorized_at ?? null,
+       agora: input.agora,
+diff --git a/lib/ai/elegibilidade/gate.ts b/lib/ai/elegibilidade/gate.ts
+index 30a4210..c834726 100644
+--- a/lib/ai/elegibilidade/gate.ts
++++ b/lib/ai/elegibilidade/gate.ts
+@@ -63,6 +63,11 @@ export interface EstadoDeElegibilidade {
+   botSilencedUntil: Date | number | null;
+   /** `conversations.assignee_kind` — `'user'` = uma pessoa é a dona do thread. */
+   assigneeKind: string | null;
++  /**
++   * O contato tem negócio ganho/perdido e nenhum em aberto
++   * (`lib/leads/negocio-encerrado.ts`). Ausente = não encerrado.
++   */
++  negocioEncerrado?: boolean;
+   /** `contacts.ai_authorized_at`. `null` = nunca autorizado. */
+   aiAuthorizedAt: Date | null;
+   /** O allowlist representa o período de teste deste canal. */
+@@ -80,6 +85,7 @@ export type MotivoDeElegibilidade =
+   | "force_human"
+   | "conversa_silenciada"
+   | "conversa_de_humano"
++  | "negocio_encerrado"
+   | "fora_da_lista_de_teste"
+   | "numero_de_teste"
+   | "sem_autorizacao"
+@@ -119,6 +125,11 @@ export function decidirElegibilidade(e: EstadoDeElegibilidade): DecisaoDeElegibi
+   if (e.assigneeKind === "user") {
+     return { permite: false, motivo: "conversa_de_humano", bloqueioPorAllowlist: false };
+   }
++  // Negócio ganho ou perdido, sem outro em aberto: a IA não fala mais com o
++  // contato — nem resposta, nem follow-up. Vale com o gate aberto também.
++  if (e.negocioEncerrado === true) {
++    return { permite: false, motivo: "negocio_encerrado", bloqueioPorAllowlist: false };
++  }
+ 
+   if (e.modo === "open") {
+     return { permite: true, motivo: "gate_aberto", bloqueioPorAllowlist: false };
+@@ -184,6 +195,7 @@ export function montarEstadoDeElegibilidade(raw: {
+   contactPhoneNumber?: string | null;
+   forceHuman: unknown;
+   assigneeKind: string | null;
++  negocioEncerrado?: unknown;
+   botSilencedUntil: Date | string | number | null | undefined;
+   aiAuthorizedAt: Date | string | null | undefined;
+   agora: Date;
+@@ -198,6 +210,7 @@ export function montarEstadoDeElegibilidade(raw: {
+     forceHuman: raw.forceHuman === true,
+     botSilencedUntil: normalizarInstante(raw.botSilencedUntil),
+     assigneeKind: raw.assigneeKind,
++    negocioEncerrado: raw.negocioEncerrado === true,
+     aiAuthorizedAt: autorizadoEm instanceof Date ? autorizadoEm : null,
+     preGoLiveAtivo: preGoLive,
+     numeroDeTesteAutorizado:
+diff --git a/lib/event-log/register-handlers.ts b/lib/event-log/register-handlers.ts
+index 3e04d8a..836ee18 100644
+--- a/lib/event-log/register-handlers.ts
++++ b/lib/event-log/register-handlers.ts
+@@ -26,6 +26,7 @@ import { webPushInboundHandler } from "@/lib/notifications/push.handler";
+ import { conversaoDeQualificacaoHandler } from "@/lib/conversoes/qualificacao.handler";
+ import { conversaoDeVendaHandler } from "@/lib/conversoes/envio.handler";
+ import { avisoDeEtapaHandler } from "@/lib/leads/aviso-de-etapa.handler";
++import { negocioEncerradoHandler } from "@/lib/leads/negocio-encerrado.handler";
+ import { avisoDeCasoAoSuporteHandler } from "@/lib/escalacao/aviso-ao-suporte.handler";
+ import { avisoDePropostaNoWhatsAppHandler } from "@/lib/propostas/aviso-no-whatsapp.handler";
+ import { registerHandler } from "@/lib/event-log/dispatcher";
+@@ -56,6 +57,9 @@ export function ensureHandlersRegistered(): void {
+   // Escrita curta no banco (um item na Central), vizinha do gatilho de etapa
+   // que consome o mesmo evento.
+   registerHandler(avisoDeEtapaHandler);
++  // Negócio ganho/perdido: cancela follow-ups e retornos do contato. Escrita
++  // curta no banco, sem rede de terceiro.
++  registerHandler(negocioEncerradoHandler);
+   registerHandler(followupGatilhoLeadHandler);
+   registerHandler(followupGatilhoCasoHandler);
+   // O caso aberto na Central, na hora — escrita curta no banco (um item), ao
+diff --git a/lib/i18n/dicionario.ts b/lib/i18n/dicionario.ts
+index d209e16..8cba94a 100644
+--- a/lib/i18n/dicionario.ts
++++ b/lib/i18n/dicionario.ts
+@@ -11205,6 +11205,7 @@ export const DICIONARIO: Traducoes = {
+   "Este atendimento está atribuído a uma pessoa. O responsável pode autorizar somente este link pelo botão de envio.": { es: "Esta atención está asignada a una persona. El responsable puede autorizar solo este enlace con el botón de envío." },
+   "O contato não está autorizado para atendimento automático. O responsável pode autorizar somente este link pelo botão de envio.": { es: "El contacto no está autorizado para la atención automática. El responsable puede autorizar solo este enlace con el botón de envío." },
+   "A autorização de atendimento automático expirou. O responsável pode autorizar somente este link pelo botão de envio.": { es: "La autorización de atención automática venció. El responsable puede autorizar solo este enlace con el botón de envío." },
++  "O negócio deste contato está ganho ou perdido, e a IA não envia mais mensagens a ele. O responsável pode autorizar somente este link pelo botão de envio.": { es: "El negocio de este contacto está ganado o perdido, y la IA ya no le envía mensajes. El responsable puede autorizar solo este enlace con el botón de envío." },
+   "O envio atingiu uma janela ou limite do canal. Aguarde a liberação antes de tentar novamente.": { es: "El envío alcanzó una ventana o un límite del canal. Espera a que se habilite antes de intentarlo de nuevo." },
+   "Uma regra de envio impediu a mensagem. Confira o aviso na Central antes de tentar novamente.": { es: "Una regla de envío bloqueó el mensaje. Revisa el aviso en la Central antes de intentarlo de nuevo." },
+   "Sua reunião está marcada para": { es: "Tu reunión está programada para" },
+diff --git a/lib/i18n/traducoes/zh-CN.json b/lib/i18n/traducoes/zh-CN.json
+index e292d01..3ae90d7 100644
+--- a/lib/i18n/traducoes/zh-CN.json
++++ b/lib/i18n/traducoes/zh-CN.json
+@@ -5248,6 +5248,7 @@
+   "Este atendimento está atribuído a uma pessoa. O responsável pode autorizar somente este link pelo botão de envio.": "此接待已分配给某人。负责人可通过发送按钮仅授权此链接。",
+   "O contato não está autorizado para atendimento automático. O responsável pode autorizar somente este link pelo botão de envio.": "该联系人未获自动接待授权。负责人可通过发送按钮仅授权此链接。",
+   "A autorização de atendimento automático expirou. O responsável pode autorizar somente este link pelo botão de envio.": "自动接待授权已过期。负责人可通过发送按钮仅授权此链接。",
++  "O negócio deste contato está ganho ou perdido, e a IA não envia mais mensagens a ele. O responsável pode autorizar somente este link pelo botão de envio.": "该联系人的商机已赢单或丢单，AI 不再向其发送消息。负责人可通过发送按钮仅授权此链接。",
+   "O envio atingiu uma janela ou limite do canal. Aguarde a liberação antes de tentar novamente.": "发送已达到渠道的时间窗口或限制。请等待解除限制后再重试。",
+   "Uma regra de envio impediu a mensagem. Confira o aviso na Central antes de tentar novamente.": "发送规则阻止了消息。请先查看通知中心中的提醒，再重试。",
+   "Sua reunião está marcada para": "您的会议已安排在",
+diff --git a/lib/leads/negocio-encerrado.handler.ts b/lib/leads/negocio-encerrado.handler.ts
+new file mode 100644
+index 0000000..2e6757a
+--- /dev/null
++++ b/lib/leads/negocio-encerrado.handler.ts
+@@ -0,0 +1,65 @@
++/**
++ * Negócio foi para GANHO ou PERDIDO → cancela o que estava agendado para o
++ * contato (inscrições em fluxo de follow-up e retornos prometidos).
++ *
++ * É a FAXINA, não a garantia: quem impede o envio é a leitura feita na hora, no
++ * gate de elegibilidade e no início de cada turno (`./negocio-encerrado.ts`).
++ * Este consumidor existe para a fila de follow-ups mostrar "cancelado" assim que
++ * o negócio fecha, e para um follow-up antigo não voltar a correr se o negócio
++ * for reaberto semanas depois.
++ *
++ * Cobre toda forma de fechar (botão, arrasto no quadro, lote, IA, automação):
++ * todas terminam num UPDATE de `stage_id`, e o banco emite `lead.won` /
++ * `lead.lost`. Se o contato ainda tem outro negócio em aberto, nada é cancelado.
++ */
++import type { EventHandler, EventRow, HandlerResult } from "@/lib/event-log/dispatcher";
++import { createAdminClient } from "@/lib/supabase/admin";
++
++import {
++  cancelarFollowupsDoContatoViaSupabase,
++  contatoComNegocioEncerradoViaSupabase,
++} from "./negocio-encerrado";
++
++const CONSUMER_KEY = "leads.negocio-encerrado-cala-followups";
++
++const resultado = (status: HandlerResult["status"], detail?: string): HandlerResult => ({
++  consumer_key: CONSUMER_KEY,
++  status,
++  detail,
++});
++
++async function handle(row: EventRow): Promise<HandlerResult> {
++  const leadId =
++    typeof row.payload?.lead_id === "string" && row.payload.lead_id
++      ? row.payload.lead_id
++      : row.entity_id;
++  if (!leadId) return resultado("skipped", "sem_lead");
++
++  const admin = createAdminClient();
++  try {
++    // ⚠️ Organização junto do id: o client é service-role e ignora RLS.
++    const { data: lead, error } = await admin
++      .from("crm_leads")
++      .select("contact_id")
++      .eq("organization_id", row.organization_id)
++      .eq("id", leadId)
++      .maybeSingle();
++    if (error) return resultado("error", `leitura do negócio falhou: ${error.message}`);
++    const contactId = (lead as { contact_id: string | null } | null)?.contact_id ?? null;
++    if (!contactId) return resultado("skipped", "negocio_sem_contato");
++
++    if (!(await contatoComNegocioEncerradoViaSupabase(admin, row.organization_id, contactId))) {
++      return resultado("skipped", "contato_com_negocio_aberto");
++    }
++    const c = await cancelarFollowupsDoContatoViaSupabase(admin, row.organization_id, contactId);
++    return resultado("ok", `inscricoes=${c.inscricoes} retornos=${c.retornos}`);
++  } catch (err) {
++    return resultado("error", (err instanceof Error ? err.message : String(err)).slice(0, 200));
++  }
++}
++
++export const negocioEncerradoHandler: EventHandler = {
++  key: CONSUMER_KEY,
++  events: ["lead.won", "lead.lost"],
++  handle,
++};
+diff --git a/lib/leads/negocio-encerrado.test.ts b/lib/leads/negocio-encerrado.test.ts
+new file mode 100644
+index 0000000..f16c276
+--- /dev/null
++++ b/lib/leads/negocio-encerrado.test.ts
+@@ -0,0 +1,82 @@
++import { describe, expect, it } from "vitest";
++
++import { decidirElegibilidade, montarEstadoDeElegibilidade } from "@/lib/ai/elegibilidade/gate";
++
++import {
++  cancelarFollowupsDoContato,
++  contatoComNegocioEncerrado,
++  negocioEncerradoPelosStatus,
++  type ConsultaPg,
++} from "./negocio-encerrado";
++
++describe("negocioEncerradoPelosStatus", () => {
++  it("ganho ou perdido, sem negócio aberto → encerrado", () => {
++    expect(negocioEncerradoPelosStatus(["won"])).toBe(true);
++    expect(negocioEncerradoPelosStatus(["lost"])).toBe(true);
++    expect(negocioEncerradoPelosStatus(["lost", "won"])).toBe(true);
++  });
++
++  it("cliente que volta: negócio novo em aberto devolve o atendimento à IA", () => {
++    expect(negocioEncerradoPelosStatus(["won", "open"])).toBe(false);
++    expect(negocioEncerradoPelosStatus(["lost", "open"])).toBe(false);
++  });
++
++  it("contato sem negócio, ou só com aberto, não é encerrado", () => {
++    expect(negocioEncerradoPelosStatus([])).toBe(false);
++    expect(negocioEncerradoPelosStatus(["open"])).toBe(false);
++  });
++});
++
++describe("gate de elegibilidade — negócio encerrado", () => {
++  const cru = {
++    aiGate: "open",
++    forceHuman: false,
++    assigneeKind: "ai",
++    botSilencedUntil: null,
++    aiAuthorizedAt: null,
++    agora: new Date("2026-10-06T12:00:00Z"),
++    ttlMs: 1000,
++  };
++
++  it("veta mesmo com o gate aberto", () => {
++    const d = decidirElegibilidade(montarEstadoDeElegibilidade({ ...cru, negocioEncerrado: true }));
++    expect(d).toEqual({ permite: false, motivo: "negocio_encerrado", bloqueioPorAllowlist: false });
++  });
++
++  it("ausente ou falso não muda nada", () => {
++    expect(decidirElegibilidade(montarEstadoDeElegibilidade(cru)).permite).toBe(true);
++    expect(
++      decidirElegibilidade(montarEstadoDeElegibilidade({ ...cru, negocioEncerrado: false })).permite,
++    ).toBe(true);
++  });
++});
++
++function dbFalso(respostas: { rows?: unknown[]; rowCount?: number }[]) {
++  const chamadas: { text: string; values: unknown[] | undefined }[] = [];
++  const db: ConsultaPg = {
++    async query<R>(text: string, values?: unknown[]) {
++      chamadas.push({ text, values });
++      const r = respostas.shift() ?? {};
++      return { rows: (r.rows ?? []) as R[], rowCount: r.rowCount ?? 0 };
++    },
++  };
++  return { db, chamadas };
++}
++
++describe("consultas pg", () => {
++  it("contatoComNegocioEncerrado filtra organização e contato", async () => {
++    const { db, chamadas } = dbFalso([{ rows: [{ encerrado: true }] }]);
++    expect(await contatoComNegocioEncerrado(db, "org", "ct")).toBe(true);
++    expect(chamadas[0]!.values).toEqual(["org", "ct"]);
++    expect(chamadas[0]!.text).toContain("nl.organization_id = $1 and nl.contact_id = $2");
++  });
++
++  it("cancelarFollowupsDoContato cancela inscrições vivas e retornos, sempre por organização", async () => {
++    const { db, chamadas } = dbFalso([{ rowCount: 2 }, { rowCount: 1 }]);
++    expect(await cancelarFollowupsDoContato(db, "org", "ct")).toEqual({ inscricoes: 2, retornos: 1 });
++    expect(chamadas[0]!.text).toContain("update followup_enrollments");
++    expect(chamadas[0]!.values?.slice(0, 3)).toEqual(["org", "ct", "negocio_encerrado"]);
++    expect(chamadas[1]!.text).toContain("update cron_jobs set enabled = false");
++    for (const c of chamadas) expect(c.text).toContain("organization_id = $1");
++  });
++});
+diff --git a/lib/leads/negocio-encerrado.ts b/lib/leads/negocio-encerrado.ts
+new file mode 100644
+index 0000000..6d06f8e
+--- /dev/null
++++ b/lib/leads/negocio-encerrado.ts
+@@ -0,0 +1,178 @@
++/**
++ * NEGÓCIO ENCERRADO CALA A IA.
++ *
++ * Quando o negócio de um contato vai para GANHO ou PERDIDO, a IA para de falar
++ * com ele: não responde mensagem nova e não dispara follow-up nem retorno
++ * agendado. Pedido do operador — o cliente que já fechou (ou já recusou) não
++ * pode continuar recebendo mensagem automática de venda.
++ *
++ * ─── A regra ────────────────────────────────────────────────────────────────
++ *
++ * O contato está "encerrado" quando tem PELO MENOS UM negócio ganho/perdido e
++ * NENHUM negócio em aberto. A conversa não tem `lead_id` (ela pende do contato,
++ * e um contato pode ter vários negócios), então a regra é por contato:
++ *
++ *   - cliente que volta e ganha um negócio novo em aberto → a IA volta a atender;
++ *   - negócio reaberto (volta para etapa aberta)          → a IA volta a atender;
++ *   - contato sem negócio nenhum                          → nada muda.
++ *
++ * É a mesma leitura de `resolveActiveLeadForContact` (`./active-lead.ts`), que
++ * só considera `status = 'open'` como negócio ativo.
++ *
++ * ─── Por que é lido na hora, e não gravado ──────────────────────────────────
++ *
++ * Um carimbo de "silenciado" teria de ser desfeito em toda reabertura, em todo
++ * negócio novo, em toda importação — e `bot_silenced_until = 'infinity'` é
++ * devolvido à IA pelo cron de devolução automática. Ler `crm_leads.status` no
++ * instante do envio não tem corrida com o dreno de eventos e se cura sozinho.
++ * O cancelamento do que já estava agendado (`cancelarFollowupsDoContato`) é
++ * faxina por cima disso, não a garantia.
++ *
++ * O que NÃO é alcançado, de propósito: envio de pessoa pela tela, resposta
++ * aprovada por pessoa, automações, campanhas e lembretes de agenda.
++ */
++import type { SupabaseClient } from "@supabase/supabase-js";
++
++/** Gravado em `followup_enrollments.cancel_reason`. */
++export const MOTIVO_CANCELAMENTO_POR_NEGOCIO_ENCERRADO = "negocio_encerrado";
++
++/** Status de inscrição que ainda podem voltar a falar com o contato. */
++const STATUS_DE_INSCRICAO_VIVA = [
++  "active",
++  "waiting_reply",
++  "dormente",
++  "paused_handoff",
++  "paused_manual",
++  "coletando",
++] as const;
++
++/** O mínimo de `pg.Pool`/`pg.PoolClient` que este módulo usa. */
++export interface ConsultaPg {
++  query<R = unknown>(
++    text: string,
++    values?: unknown[],
++  ): Promise<{ rows: R[]; rowCount: number | null }>;
++}
++
++/**
++ * Expressão SQL booleana da regra, para embutir em outra consulta.
++ * `org` e `contato` são expressões SQL (coluna ou placeholder), nunca valor.
++ */
++export function sqlNegocioEncerrado(org: string, contato: string): string {
++  return `(
++    exists (
++      select 1 from crm_leads nl
++      where nl.organization_id = ${org} and nl.contact_id = ${contato}
++        and nl.status in ('won', 'lost')
++    )
++    and not exists (
++      select 1 from crm_leads nl
++      where nl.organization_id = ${org} and nl.contact_id = ${contato}
++        and nl.status = 'open'
++    )
++  )`;
++}
++
++/** A regra pura, sobre os status dos negócios do contato. */
++export function negocioEncerradoPelosStatus(statuses: readonly string[]): boolean {
++  return (
++    statuses.some((s) => s === "won" || s === "lost") && !statuses.some((s) => s === "open")
++  );
++}
++
++export async function contatoComNegocioEncerrado(
++  db: ConsultaPg,
++  organizationId: string,
++  contactId: string,
++): Promise<boolean> {
++  const { rows } = await db.query<{ encerrado: boolean }>(
++    `select ${sqlNegocioEncerrado("$1", "$2")} as encerrado`,
++    [organizationId, contactId],
++  );
++  return rows[0]?.encerrado === true;
++}
++
++/** Lança em erro de banco — o chamador decide (os caminhos de IA falham fechado). */
++export async function contatoComNegocioEncerradoViaSupabase(
++  admin: SupabaseClient,
++  organizationId: string,
++  contactId: string,
++): Promise<boolean> {
++  const { data, error } = await admin
++    .from("crm_leads")
++    .select("status")
++    .eq("organization_id", organizationId)
++    .eq("contact_id", contactId)
++    .limit(1000);
++  if (error) throw new Error(`negócio encerrado: leitura falhou — ${error.message}`);
++  return negocioEncerradoPelosStatus(
++    ((data ?? []) as { status: string }[]).map((l) => l.status),
++  );
++}
++
++export interface FollowupsCancelados {
++  inscricoes: number;
++  retornos: number;
++}
++
++/**
++ * Cancela o que estava agendado para o contato: inscrições vivas em fluxo de
++ * follow-up e retornos prometidos (`cron_jobs`). Idempotente — a segunda
++ * passada não encontra linha viva.
++ */
++export async function cancelarFollowupsDoContato(
++  db: ConsultaPg,
++  organizationId: string,
++  contactId: string,
++): Promise<FollowupsCancelados> {
++  const inscricoes = await db.query(
++    `update followup_enrollments
++        set status = 'cancelled', cancel_reason = $3, completed_at = now(),
++            next_eval_at = null, claimed_until = null, updated_at = now()
++      where organization_id = $1 and contact_id = $2 and status = any($4::text[])`,
++    [
++      organizationId,
++      contactId,
++      MOTIVO_CANCELAMENTO_POR_NEGOCIO_ENCERRADO,
++      [...STATUS_DE_INSCRICAO_VIVA],
++    ],
++  );
++  const retornos = await db.query(
++    `update cron_jobs set enabled = false, updated_at = now()
++      where organization_id = $1 and contact_id = $2 and enabled = true`,
++    [organizationId, contactId],
++  );
++  return { inscricoes: inscricoes.rowCount ?? 0, retornos: retornos.rowCount ?? 0 };
++}
++
++export async function cancelarFollowupsDoContatoViaSupabase(
++  admin: SupabaseClient,
++  organizationId: string,
++  contactId: string,
++): Promise<FollowupsCancelados> {
++  const { data: insc, error: inscErr } = await admin
++    .from("followup_enrollments")
++    .update({
++      status: "cancelled",
++      cancel_reason: MOTIVO_CANCELAMENTO_POR_NEGOCIO_ENCERRADO,
++      completed_at: new Date().toISOString(),
++      next_eval_at: null,
++      claimed_until: null,
++    })
++    .eq("organization_id", organizationId)
++    .eq("contact_id", contactId)
++    .in("status", [...STATUS_DE_INSCRICAO_VIVA])
++    .select("id");
++  if (inscErr) throw new Error(`followup_enrollments: ${inscErr.message}`);
++
++  const { data: crons, error: cronErr } = await admin
++    .from("cron_jobs")
++    .update({ enabled: false })
++    .eq("organization_id", organizationId)
++    .eq("contact_id", contactId)
++    .eq("enabled", true)
++    .select("id");
++  if (cronErr) throw new Error(`cron_jobs: ${cronErr.message}`);
++
++  return { inscricoes: (insc ?? []).length, retornos: (crons ?? []).length };
++}
+-- 
+2.43.0
+
