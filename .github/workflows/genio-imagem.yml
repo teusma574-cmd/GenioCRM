@@ -1,0 +1,86 @@
+# Imagem do GenioCRM construída FORA da VPS.
+#
+# A VPS de produção não tem memória para o `next build` (o Supabase roda nela),
+# então a imagem é construída aqui e publicada como arquivo num release fixo
+# (`imagens`). A VPS só baixa e carrega:
+#
+#   curl -fL -o /root/genio-app.tar.gz \
+#     https://github.com/<dono>/<repo>/releases/download/imagens/genio-app.tar.gz
+#   gunzip -c /root/genio-app.tar.gz | docker load      # → deskcomm-app:genio
+#
+# Roda em push para `feat/**` e `deploy/**`, ou manualmente (Actions › Run workflow).
+name: genio-imagem
+
+on:
+  push:
+    branches: ["feat/**", "deploy/**"]
+  workflow_dispatch:
+    inputs:
+      servico:
+        description: "Qual imagem construir"
+        type: choice
+        default: app
+        options: [app, worker, scheduler]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: genio-imagem-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  construir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SERVICO: ${{ inputs.servico || 'app' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dockerfile do serviço
+        id: alvo
+        run: |
+          case "$SERVICO" in
+            app) echo "dockerfile=Dockerfile" >> "$GITHUB_OUTPUT" ;;
+            worker) echo "dockerfile=Dockerfile.worker" >> "$GITHUB_OUTPUT" ;;
+            scheduler) echo "dockerfile=Dockerfile.scheduler" >> "$GITHUB_OUTPUT" ;;
+            *) echo "serviço desconhecido: $SERVICO" >&2; exit 1 ;;
+          esac
+          echo "versao=1.67.0-genio-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Construir a imagem (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.alvo.outputs.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          tags: deskcomm-${{ env.SERVICO }}:genio
+          build-args: |
+            APP_VERSION=${{ steps.alvo.outputs.versao }}
+          cache-from: type=gha,scope=genio-${{ env.SERVICO }}
+          cache-to: type=gha,mode=max,scope=genio-${{ env.SERVICO }}
+
+      - name: Empacotar
+        run: |
+          docker save "deskcomm-${SERVICO}:genio" | gzip -6 > "genio-${SERVICO}.tar.gz"
+          sha256sum "genio-${SERVICO}.tar.gz" | tee "genio-${SERVICO}.tar.gz.sha256"
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF_NAME}"
+            echo "versao=${{ steps.alvo.outputs.versao }}"
+          } > "genio-${SERVICO}.info"
+          ls -lh "genio-${SERVICO}".*
+
+      - name: Publicar no release `imagens`
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view imagens >/dev/null 2>&1 || gh release create imagens \
+            --prerelease --title "Imagens do GenioCRM" \
+            --notes "Imagens construídas pelo workflow genio-imagem. Os arquivos são substituídos a cada build."
+          gh release upload imagens --clobber \
+            "genio-${SERVICO}.tar.gz" "genio-${SERVICO}.tar.gz.sha256" "genio-${SERVICO}.info"
